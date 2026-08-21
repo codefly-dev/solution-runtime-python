@@ -1,0 +1,10 @@
+[project]
+name = "solution-runtime"
+version = "0.0.1"
+description = "Generic Python runtime for codefly solutions"
+requires-python = ">=3.11"
+dependencies = ["protobuf", "googleapis-common-protos", "protovalidate"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
