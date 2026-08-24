@@ -134,12 +134,14 @@ class Solution:
             "GATEWAY_REGISTER_URL", "http://localhost:42152/solutions/_register"
         )
         self_upstream = _env("SELF_UPSTREAM", self._public_url)
-        _spawn(_heartbeat, host_register, self.manifest(), f"host as {self.id}")
+        headers = _register_headers()
+        _spawn(_heartbeat, host_register, self.manifest(), f"host as {self.id}", headers)
         _spawn(
             _heartbeat,
             gateway_register,
             {"id": self.id, "upstream": self_upstream},
             f"gateway as {self.id}",
+            headers,
         )
         print(f"solution {self.id!r} listening on :{self._port} (gateway={self._gateway_url})", flush=True)
         handler = partial(_RequestHandler, self)
@@ -150,12 +152,20 @@ def _spawn(target, *args) -> None:
     threading.Thread(target=target, args=args, daemon=True).start()
 
 
-def _heartbeat(url: str, body: dict, label: str) -> None:
+def _register_headers() -> dict:
+    headers = {"content-type": "application/json"}
+    token = os.environ.get("CODEFLY_INTERNAL_TOKEN", "").strip()
+    if token:
+        headers["x-codefly-internal-token"] = token
+    return headers
+
+
+def _heartbeat(url: str, body: dict, label: str, headers: dict) -> None:
     logged = False
     while True:
         data = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
-            url, data=data, headers={"content-type": "application/json"}, method="POST"
+            url, data=data, headers=headers, method="POST"
         )
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
