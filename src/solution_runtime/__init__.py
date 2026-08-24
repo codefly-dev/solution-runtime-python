@@ -154,7 +154,7 @@ def _spawn(target, *args) -> None:
 
 def _register_headers() -> dict:
     headers = {"content-type": "application/json"}
-    token = os.environ.get("CODEFLY_INTERNAL_TOKEN")
+    token = os.environ.get("CODEFLY_INTERNAL_TOKEN", "").strip()
     if token:
         headers["x-codefly-internal-token"] = token
     return headers
