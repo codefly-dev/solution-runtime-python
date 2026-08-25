@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package saas.accounts.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// A self-contained slice of the real accounts audit surface, trimmed to what
+// the facade generator needs to exercise: two services (so the declared-subset
+// filter is tested), a snake_case-worthy RPC name, and a message that lives in
+// this same file so import resolution is covered.
+
+message AuditEvent {
+  string id = 1;
+  string actor_id = 2;
+  string event_type = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message QueryAuditLogRequest {
+  int32 page_size = 1;
+}
+
+message QueryAuditLogResponse {
+  repeated AuditEvent events = 1;
+  string next_page_token = 2;
+}
+
+message GetProfileRequest {
+  string user_id = 1;
+}
+
+message GetProfileResponse {
+  string display_name = 1;
+}
+
+service AuditService {
+  rpc QueryAuditLog(QueryAuditLogRequest) returns (QueryAuditLogResponse);
+}
+
+service IdentityService {
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+}

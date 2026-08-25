@@ -5,6 +5,17 @@ description = "Generic Python runtime for codefly solutions"
 requires-python = ">=3.11"
 dependencies = ["protobuf", "googleapis-common-protos", "protovalidate"]
 
+[project.optional-dependencies]
+# `solution-sdk`, the per-solution SDK generator, is a build-time tool — not
+# needed at serve time. Install it where SDKs are regenerated: `pip install
+# 'solution-runtime[sdk]'`.
+sdk = ["pyyaml"]
+
+[project.scripts]
+solution-sdk = "solution_runtime.sdk.sync:main"
+# protoc/buf plugin: invoked as `protoc-gen-solution_facade` by the generator.
+protoc-gen-solution_facade = "solution_runtime.sdk.facade_gen:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
