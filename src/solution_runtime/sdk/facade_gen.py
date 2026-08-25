@@ -113,20 +113,36 @@ def render(
         return aliases[module_name]
 
     service_blocks: list[str] = []
+    class_names: dict[str, tuple[str, str]] = {}
     for package, service in services:
         class_name = _class_name(service.name)
+        if class_name in class_names:
+            other_pkg, other_svc = class_names[class_name]
+            raise ValueError(
+                f"service class collision: {package}.{service.name} and "
+                f"{other_pkg}.{other_svc} both map to {class_name}"
+            )
+        class_names[class_name] = (package, service.name)
         lines = [
             f"class {class_name}:",
             "    def __init__(self, gateway):",
             "        self._gateway = gateway",
             "",
         ]
+        method_names: dict[str, str] = {}
         for method in service.method:
+            method_name = _snake(method.name)
+            if method_name in method_names:
+                raise ValueError(
+                    f"method name collision in {package}.{service.name}: "
+                    f"{method.name} and {method_names[method_name]} both map to {method_name}"
+                )
+            method_names[method_name] = method.name
             response_alias = alias_for(types.module_of(method.output_type))
             response_ref = types.reference(method.output_type, response_alias)
             procedure = f"/{package}.{service.name}/{method.name}"
             lines += [
-                f"    def {_snake(method.name)}(self, request):",
+                f"    def {method_name}(self, request):",
                 f'        return self._gateway.unary("{procedure}", request, {response_ref})',
                 "",
             ]
@@ -139,9 +155,17 @@ def render(
         "        self._gateway = gateway",
         "",
     ]
+    accessor_names: dict[str, str] = {}
     for package, service in services:
+        accessor = _accessor_name(service.name)
+        if accessor in accessor_names:
+            raise ValueError(
+                f"service accessor collision: {service.name} and "
+                f"{accessor_names[accessor]} both map to {accessor}()"
+            )
+        accessor_names[accessor] = service.name
         client_lines += [
-            f"    def {_accessor_name(service.name)}(self):",
+            f"    def {accessor}(self):",
             f"        return {_class_name(service.name)}(self._gateway)",
             "",
         ]
@@ -179,21 +203,46 @@ def generate(request: plugin_pb2.CodeGeneratorRequest) -> plugin_pb2.CodeGenerat
     types = _TypeIndex(list(request.proto_file))
     options = _parse_parameter(request.parameter)
     targets = [fd for fd in request.proto_file if fd.name in set(request.file_to_generate)]
-    package = next((fd.package for fd in targets if fd.service), "")
-    module = options.get("module") or _default_module_name(package)
     selected = frozenset(filter(None, options.get("services", "").split("+")))
 
-    content = render(targets, types, module, selected)
-    if content is not None:
+    if selected:
+        available = {service.name for fd in targets for service in fd.service}
+        unknown = selected - available
+        if unknown:
+            raise ValueError(f"declared services not found in the proto: {sorted(unknown)}")
+
+    # A service's fully-qualified name — hence its facade — is per package, so
+    # each package gets its own file rather than being merged under one factory.
+    groups: dict[str, list[FileDescriptorProto]] = {}
+    for fd in targets:
+        if fd.service:
+            groups.setdefault(fd.package, []).append(fd)
+
+    explicit_module = options.get("module")
+    emitted: dict[str, str] = {}
+    for package, files in groups.items():
+        module = explicit_module if explicit_module and len(groups) == 1 else _default_module_name(package)
+        content = render(files, types, module, selected)
+        if content is None:
+            continue
+        name = f"{module}.py"
+        if name in emitted:
+            raise ValueError(
+                f"module name collision: packages {package} and {emitted[name]} both map to {module}"
+            )
+        emitted[name] = package
         generated = response.file.add()
-        generated.name = f"{module}.py"
+        generated.name = name
         generated.content = content
     return response
 
 
 def main() -> None:
     request = plugin_pb2.CodeGeneratorRequest.FromString(sys.stdin.buffer.read())
-    response = generate(request)
+    try:
+        response = generate(request)
+    except ValueError as error:
+        response = plugin_pb2.CodeGeneratorResponse(error=str(error))
     sys.stdout.buffer.write(response.SerializeToString())
 
 

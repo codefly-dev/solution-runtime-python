@@ -9,6 +9,7 @@ request pass-through, and response type are correct.
 from __future__ import annotations
 
 import importlib
+import io
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from google.protobuf.compiler import plugin_pb2
-from google.protobuf.descriptor_pb2 import FileDescriptorSet
+from google.protobuf.descriptor_pb2 import FileDescriptorProto, FileDescriptorSet
 
 from solution_runtime.sdk import facade_gen
 
@@ -114,3 +115,92 @@ def test_facade_routes_through_gateway(tmp_path):
     assert procedure == "/saas.accounts.v1.AuditService/QueryAuditLog"
     assert sent is request
     assert response_type is audit_pb2.QueryAuditLogResponse
+
+
+# --- descriptor-level tests (no protoc needed) -------------------------------
+
+
+def _file(name, package, messages, services):
+    fd = FileDescriptorProto(name=name, package=package)
+    for message in messages:
+        fd.message_type.add(name=message)
+    for service_name, methods in services:
+        service = fd.service.add(name=service_name)
+        for method_name, input_type, output_type in methods:
+            service.method.add(name=method_name, input_type=input_type, output_type=output_type)
+    return fd
+
+
+def _desc_request(files, generate, parameter=""):
+    request = plugin_pb2.CodeGeneratorRequest(parameter=parameter)
+    request.proto_file.extend(files)
+    request.file_to_generate.extend(generate)
+    return request
+
+
+def test_declared_service_typo_fails_loud():
+    fd = _file(
+        "a.proto",
+        "svc.v1",
+        ["Req", "Resp"],
+        [("AuditService", [("Do", ".svc.v1.Req", ".svc.v1.Resp")])],
+    )
+    with pytest.raises(ValueError, match="declared services not found"):
+        facade_gen.generate(_desc_request([fd], ["a.proto"], "services=AudtiService"))
+
+
+def test_method_name_collision_fails_loud():
+    # DoX and Do_X both snake-case to do_x.
+    fd = _file(
+        "a.proto",
+        "svc.v1",
+        ["Req", "Resp"],
+        [("S", [("DoX", ".svc.v1.Req", ".svc.v1.Resp"), ("Do_X", ".svc.v1.Req", ".svc.v1.Resp")])],
+    )
+    with pytest.raises(ValueError, match="method name collision"):
+        facade_gen.generate(_desc_request([fd], ["a.proto"]))
+
+
+def test_same_named_service_across_files_collides():
+    common = ["Req", "Resp"]
+    files = [
+        _file("a.proto", "svc.v1", common, [("AuditService", [("Do", ".svc.v1.Req", ".svc.v1.Resp")])]),
+        _file("b.proto", "svc.v1", [], [("AuditService", [("Do2", ".svc.v1.Req", ".svc.v1.Resp")])]),
+    ]
+    with pytest.raises(ValueError, match="service class collision"):
+        facade_gen.generate(_desc_request(files, ["a.proto", "b.proto"]))
+
+
+def test_multiple_packages_emit_separate_files():
+    files = [
+        _file("a.proto", "one.v1", ["Req", "Resp"], [("AlphaService", [("Do", ".one.v1.Req", ".one.v1.Resp")])]),
+        _file("b.proto", "two.v1", ["Req", "Resp"], [("BetaService", [("Do", ".two.v1.Req", ".two.v1.Resp")])]),
+    ]
+    response = facade_gen.generate(_desc_request(files, ["a.proto", "b.proto"]))
+
+    names = sorted(f.name for f in response.file)
+    assert names == ["one.py", "two.py"]
+    one = next(f.content for f in response.file if f.name == "one.py")
+    assert '"/one.v1.AlphaService/Do"' in one
+    assert "two.v1" not in one  # packages did not bleed together
+
+
+def test_main_reports_error_via_response(monkeypatch):
+    fd = _file(
+        "a.proto",
+        "svc.v1",
+        ["Req", "Resp"],
+        [("S", [("DoX", ".svc.v1.Req", ".svc.v1.Resp"), ("Do_X", ".svc.v1.Req", ".svc.v1.Resp")])],
+    )
+    request = _desc_request([fd], ["a.proto"])
+    written = {}
+
+    monkeypatch.setattr(facade_gen.sys, "stdin", type("S", (), {"buffer": io.BytesIO(request.SerializeToString())}))
+    monkeypatch.setattr(
+        facade_gen.sys, "stdout", type("S", (), {"buffer": type("B", (), {"write": lambda _self, data: written.setdefault("data", data)})()})
+    )
+    facade_gen.main()
+
+    response = plugin_pb2.CodeGeneratorResponse.FromString(written["data"])
+    assert "method name collision" in response.error
+    assert not response.file

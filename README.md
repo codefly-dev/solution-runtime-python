@@ -21,7 +21,13 @@ The gateway URL, the caller's bearer, and the wire protocol are hidden.
 Threading a raw procedure string — `gw.unary("/saas.accounts.v1.AuditService/QueryAuditLog", req, Resp)` — and vendoring a whole module's generated `gen/` tree are the two things every solution used to repeat. `solution-sdk` replaces both: a solution declares the module dependencies it calls, and the generator builds **one SDK for that solution, carrying only the functionality it declares**, vendored so handlers use it out of the box:
 
 ```python
-from _sdk.accounts import accounts
+import sys, pathlib
+
+# The vendored root goes on sys.path, like any generated-proto tree — the
+# facade and the *_pb2 modules it imports both resolve from there.
+sys.path.insert(0, str(pathlib.Path(__file__).with_name("_sdk")))
+
+from accounts import accounts
 
 def last_login(gw: Gateway) -> dict:
     resp = accounts(gw).audit().query_audit_log(QueryAuditLogRequest(page_size=20))

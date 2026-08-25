@@ -23,9 +23,11 @@ into `out/`:
    instead of a raw procedure string.
 
 The vendored tree is self-contained and carries a `SOURCE.txt` recording every
-pin — the same drift guard `saas-sdk-go` keeps. Handlers `from <module> import
-<module>` and call through the gateway; only the declared services are present
-(one SDK per solution, carrying only the functionality it declares).
+pin — the same drift guard `saas-sdk-go` keeps. The vendored root goes on
+sys.path (like any generated-proto tree); handlers `import <module>` and call
+through the gateway. Only the services declared in `services:` are exposed, and
+only the proto files those services reference are generated — one SDK per
+solution, carrying only the functionality it declares.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,11 +86,17 @@ def load_manifest(path: Path) -> Manifest:
                 services=tuple(entry.get("services", ())),
             )
         )
-    out = (path.parent / raw.get("out", "_sdk")).resolve()
+    base = path.parent.resolve()
+    out = (base / raw.get("out", "_sdk")).resolve()
+    # `sync` deletes and rewrites `out`; confining it strictly below the
+    # manifest's own directory keeps a stray `out: .` or `out: ../src` from
+    # taking a real source tree with it.
+    if base not in out.parents:
+        raise SystemExit(f"out must be a directory within {base}, got {raw.get('out', '_sdk')!r}")
     return Manifest(out=out, dependencies=tuple(dependencies))
 
 
-def render_bindings_buf_gen() -> str:
+def render_bindings_buf_gen(out: str) -> str:
     """buf.gen.yaml for the message bindings `codefly generate proto` runs. The
     facade is a separate, descriptor-driven step — it does not belong here, and
     Connect stubs are deliberately omitted (the runtime owns the transport)."""
@@ -96,16 +105,12 @@ def render_bindings_buf_gen() -> str:
             "version": "v2",
             "clean": True,
             "plugins": [
-                {"remote": "buf.build/protocolbuffers/python", "out": "."},
-                {"remote": "buf.build/protocolbuffers/pyi", "out": "."},
+                {"remote": "buf.build/protocolbuffers/python", "out": out},
+                {"remote": "buf.build/protocolbuffers/pyi", "out": out},
             ],
         },
         sort_keys=False,
     )
-
-
-def _package_dir(dependency: Dependency) -> str:
-    return str(Path(*dependency.package.split(".")))
 
 
 def _fetch_proto(source: Source, into: Path) -> Path:
@@ -118,28 +123,82 @@ def _fetch_proto(source: Source, into: Path) -> Path:
     proto_root = into / source.subdir
     if not proto_root.is_dir():
         raise SystemExit(f"subdir {source.subdir!r} not found in {source.repo}@{source.ref}")
+    # Resolve BSR dependencies (protovalidate, googleapis, …) on the host before
+    # the descriptor build, matching what codefly's own proto path does inside
+    # its companion.
+    subprocess.run(["buf", "dep", "update"], cwd=proto_root, check=True)
     return proto_root
 
 
-def _generate_bindings(proto_root: Path, dependency: Dependency, out: Path) -> None:
-    (proto_root / "buf.gen.yaml").write_text(render_bindings_buf_gen())
-    command = ["codefly", "generate", "proto", "--proto", str(proto_root), "--output", str(out)]
-    if (proto_root / _package_dir(dependency)).is_dir():
-        command += ["--path", _package_dir(dependency)]
-    subprocess.run(command, check=True)
-
-
-def _descriptor_set(proto_root: Path, dependency: Dependency) -> FileDescriptorSet:
-    # Run from the proto root so `--path` resolves inside the build context.
-    command = ["buf", "build", ".", "--as-file-descriptor-set", "-o", "-"]
-    if (proto_root / _package_dir(dependency)).is_dir():
-        command += ["--path", _package_dir(dependency)]
-    image = subprocess.run(command, cwd=proto_root, check=True, capture_output=True).stdout
+def _descriptor_set(proto_root: Path) -> FileDescriptorSet:
+    # The whole module plus its imports — the facade's type index and the
+    # binding-file closure both need every reachable type, not one package.
+    image = subprocess.run(
+        ["buf", "build", ".", "--as-file-descriptor-set", "-o", "-"],
+        cwd=proto_root,
+        check=True,
+        capture_output=True,
+    ).stdout
     return FileDescriptorSet.FromString(image)
 
 
-def _generate_facade(proto_root: Path, dependency: Dependency, out: Path) -> None:
-    descriptors = _descriptor_set(proto_root, dependency)
+def _validate_services(descriptors: FileDescriptorSet, dependency: Dependency) -> None:
+    if not dependency.services:
+        return
+    available = {
+        service.name
+        for fd in descriptors.file
+        if fd.package == dependency.package
+        for service in fd.service
+    }
+    unknown = set(dependency.services) - available
+    if unknown:
+        raise SystemExit(
+            f"{dependency.module}: declared services not found in {dependency.package}: "
+            f"{sorted(unknown)}"
+        )
+
+
+def _binding_paths(descriptors: FileDescriptorSet, proto_root: Path, dependency: Dependency) -> list[str]:
+    """Proto files whose bindings the facade will import: the files carrying the
+    selected services, plus everything they transitively import that is local to
+    this module (well-known / BSR deps stay external). Generating only these
+    keeps the SDK minimal without under-generating a referenced type."""
+    by_name = {fd.name: fd for fd in descriptors.file}
+    selected = frozenset(dependency.services)
+    seed = [
+        fd.name
+        for fd in descriptors.file
+        if fd.package == dependency.package
+        and any(not selected or service.name in selected for service in fd.service)
+    ]
+    closure: set[str] = set()
+    queue = deque(seed)
+    while queue:
+        name = queue.popleft()
+        if name in closure or not (proto_root / name).is_file():
+            continue
+        closure.add(name)
+        descriptor = by_name.get(name)
+        if descriptor is not None:
+            queue.extend(descriptor.dependency)
+    return sorted(closure)
+
+
+def _generate_bindings(proto_root: Path, paths: list[str], out: Path) -> None:
+    # codefly runs buf from the proto dir, so buf.gen.yaml's `out` is relative to
+    # there: generate into a scratch dir inside the (temporary) proto tree, then
+    # vendor the result into the solution's `out`.
+    scratch = "_gen"
+    (proto_root / "buf.gen.yaml").write_text(render_bindings_buf_gen(scratch))
+    command = ["codefly", "generate", "proto", "--proto", str(proto_root), "--output", str(proto_root)]
+    for path in paths:
+        command += ["--path", path]
+    subprocess.run(command, check=True)
+    shutil.copytree(proto_root / scratch, out, dirs_exist_ok=True)
+
+
+def _generate_facade(descriptors: FileDescriptorSet, dependency: Dependency, out: Path) -> None:
     request = plugin_pb2.CodeGeneratorRequest()
     request.proto_file.extend(descriptors.file)
     for fd in descriptors.file:
@@ -164,15 +223,25 @@ def write_source(out: Path, dependencies: tuple[Dependency, ...]) -> None:
     (out / "SOURCE.txt").write_text("\n".join(lines) + "\n")
 
 
+def _prepare_out(out: Path) -> None:
+    # Only ever delete a directory this tool produced. A prior sync leaves a
+    # SOURCE.txt; its absence means `out` points at something we do not own.
+    if out.exists():
+        if not (out / "SOURCE.txt").is_file():
+            raise SystemExit(f"refusing to overwrite {out}: not a solution-sdk output (no SOURCE.txt)")
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+
 def sync(manifest: Manifest) -> None:
-    if manifest.out.exists():
-        shutil.rmtree(manifest.out)
-    manifest.out.mkdir(parents=True)
+    _prepare_out(manifest.out)
     for dependency in manifest.dependencies:
         with tempfile.TemporaryDirectory() as tmp:
             proto_root = _fetch_proto(dependency.source, Path(tmp))
-            _generate_bindings(proto_root, dependency, manifest.out)
-            _generate_facade(proto_root, dependency, manifest.out)
+            descriptors = _descriptor_set(proto_root)
+            _validate_services(descriptors, dependency)
+            _generate_bindings(proto_root, _binding_paths(descriptors, proto_root, dependency), manifest.out)
+            _generate_facade(descriptors, dependency, manifest.out)
     (manifest.out / "__init__.py").write_text("")
     write_source(manifest.out, manifest.dependencies)
 
