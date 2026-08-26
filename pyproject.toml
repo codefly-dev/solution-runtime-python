@@ -1,6 +1,6 @@
 [project]
 name = "solution-runtime"
-version = "0.0.1"
+version = "0.0.2"
 description = "Generic Python runtime for codefly solutions"
 requires-python = ">=3.11"
 dependencies = ["protobuf", "googleapis-common-protos", "protovalidate"]
