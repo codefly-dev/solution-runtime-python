@@ -79,6 +79,7 @@ class Solution:
     exposed_module: str = "./Page"
     contract: str = "lastlogin"
     capabilities: list[str] = field(default_factory=list)
+    dashboard: Any | None = None
     _handlers: dict[str, Handler] = field(default_factory=dict)
 
     def handle(self, path: str, handler: Handler) -> "Solution":
@@ -103,7 +104,7 @@ class Solution:
         return Path(_env("ASSETS_DIR", "../fe-remote/dist"))
 
     def manifest(self) -> dict:
-        return {
+        manifest = {
             "id": self.id,
             "nav": {"title": self.title, "path": f"/s/{self.id}", "order": self.order},
             "frontend": {
@@ -117,6 +118,9 @@ class Solution:
                 "capabilityPath": "/.well-known/capabilities",
             },
         }
+        if self.dashboard is not None:
+            manifest["dashboard"] = self.dashboard
+        return manifest
 
     def capabilities_response(self) -> dict:
         return {
