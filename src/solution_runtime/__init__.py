@@ -11,6 +11,7 @@ specific host or solution.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -174,7 +175,7 @@ def _register_interval() -> float:
         seconds = float(_env("REGISTER_INTERVAL_SECONDS", "15"))
     except ValueError:
         return 15.0
-    return seconds if seconds > 0 else 15.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 15.0
 
 
 def _post_registration(url: str, body: dict, headers: dict) -> str | None:
@@ -182,9 +183,9 @@ def _post_registration(url: str, body: dict, headers: dict) -> str | None:
     on failure. Never raises: the caller loops forever, so any escaping
     exception would kill the heartbeat thread and leave the solution stale
     until it restarts."""
-    data = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
+        data = json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(request, timeout=5) as response:
             if response.status < 300:
                 return None
@@ -196,12 +197,15 @@ def _post_registration(url: str, body: dict, headers: dict) -> str | None:
 def _heartbeat(url: str, body: dict, label: str, headers: dict, interval: float) -> None:
     healthy = False
     while True:
-        reason = _post_registration(url, body, headers)
-        if reason is None and not healthy:
-            print(f"registered with {label}", flush=True)
-        elif reason is not None and healthy:
-            print(f"lost registration with {label}: {reason}", flush=True)
-        healthy = reason is None
+        try:
+            reason = _post_registration(url, body, headers)
+            if reason is None and not healthy:
+                print(f"registered with {label}", flush=True)
+            elif reason is not None and healthy:
+                print(f"lost registration with {label}: {reason}", flush=True)
+            healthy = reason is None
+        except Exception:  # noqa: BLE001
+            healthy = False
         time.sleep(interval)
 
 

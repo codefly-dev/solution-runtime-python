@@ -56,6 +56,18 @@ class PostRegistrationTest(unittest.TestCase):
         ):
             self.assertIsInstance(_post_registration("http://x", {}, {}), str)
 
+    def test_malformed_url_does_not_escape(self):
+        # A register URL with the scheme forgotten makes Request() raise
+        # ValueError at construction. That must be caught, not escape and
+        # kill the heartbeat thread. No urlopen mock: construction fails
+        # first, so this never touches the network.
+        reason = _post_registration("registry-host/api/solutions/register", {}, {})
+        self.assertIsInstance(reason, str)
+
+    def test_unserializable_body_does_not_escape(self):
+        reason = _post_registration("http://x", {"bad": object()}, {})
+        self.assertIsInstance(reason, str)
+
 
 class _StopLoop(Exception):
     pass
@@ -102,6 +114,25 @@ class HeartbeatLoggingTest(unittest.TestCase):
         lines = _run_heartbeat(["boom", "boom", None])
         self.assertEqual(lines, ["registered with host as s"])
 
+    def test_loop_survives_print_failure(self):
+        # If writing the log line raises (e.g. BrokenPipeError on a closed
+        # stdout), the heartbeat thread must survive and keep looping.
+        sleeps = {"n": 0}
+
+        def sleep(_):
+            sleeps["n"] += 1
+            if sleeps["n"] >= 2:
+                raise _StopLoop
+
+        with (
+            mock.patch("solution_runtime._post_registration", return_value=None),
+            mock.patch("builtins.print", side_effect=BrokenPipeError),
+            mock.patch("time.sleep", side_effect=sleep),
+            contextlib.suppress(_StopLoop),
+        ):
+            _heartbeat("http://x", {}, "host as s", {}, 0)
+        self.assertEqual(sleeps["n"], 2)
+
 
 class RegisterIntervalTest(unittest.TestCase):
     def test_default(self):
@@ -118,6 +149,20 @@ class RegisterIntervalTest(unittest.TestCase):
 
     def test_non_positive_falls_back(self):
         with mock.patch.dict("os.environ", {"REGISTER_INTERVAL_SECONDS": "0"}):
+            self.assertEqual(_register_interval(), 15.0)
+
+    def test_infinite_falls_back(self):
+        # inf passes a bare `> 0` check but makes time.sleep raise
+        # OverflowError, killing the heartbeat thread. It must be rejected.
+        with mock.patch.dict("os.environ", {"REGISTER_INTERVAL_SECONDS": "inf"}):
+            self.assertEqual(_register_interval(), 15.0)
+
+    def test_overflow_to_inf_falls_back(self):
+        with mock.patch.dict("os.environ", {"REGISTER_INTERVAL_SECONDS": "1e400"}):
+            self.assertEqual(_register_interval(), 15.0)
+
+    def test_nan_falls_back(self):
+        with mock.patch.dict("os.environ", {"REGISTER_INTERVAL_SECONDS": "nan"}):
             self.assertEqual(_register_interval(), 15.0)
 
 
