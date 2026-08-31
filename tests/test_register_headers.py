@@ -35,8 +35,8 @@ class RegisterHeadersTest(unittest.TestCase):
 
     def test_stripped_token_yields_sendable_header(self):
         # A trailing newline in the header value raises ValueError at send
-        # time, which the heartbeat loop does not catch — the thread would
-        # die silently. Building the request must not raise on urlopen.
+        # time. Stripping keeps the header sendable so the request never
+        # fails on that account; building it must not raise on urlopen.
         with mock.patch.dict("os.environ", {"CODEFLY_INTERNAL_TOKEN": "secret\n"}):
             headers = _register_headers()
         request = urllib.request.Request(
