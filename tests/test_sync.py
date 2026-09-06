@@ -9,8 +9,10 @@ full `sync` (real `codefly generate proto` + BSR fetch) is not run here.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -164,3 +166,86 @@ def test_generate_facade_from_descriptor(tmp_path):
     assert "def accounts(gateway):" in facade
     assert '"/saas.accounts.v1.AuditService/QueryAuditLog"' in facade
     assert "IdentityService" not in facade  # declared subset honored
+
+
+# --- the shim ------------------------------------------------------------
+#
+# When a solution.codefly.yaml is present the contracts live in the composed
+# module package, so `solution-sdk sync` hands off to `codefly sync
+# solution-sdk`. Otherwise the legacy fetch-and-vendor path runs, once, under a
+# deprecation warning.
+
+
+def _fake_codefly(bin_dir: Path, argv_log: Path, exit_code: int = 0) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    codefly = bin_dir / "codefly"
+    codefly.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import sys
+            with open({str(argv_log)!r}, "w") as handle:
+                handle.write("\\n".join(sys.argv[1:]))
+            sys.exit({exit_code})
+            """
+        )
+    )
+    codefly.chmod(0o755)
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_main_shims_to_codefly_when_solution_manifest_present(tmp_path, exit_code):
+    solution = tmp_path / "solution"
+    solution.mkdir()
+    (solution / "solution.codefly.yaml").write_text("api:\n  consumes: []\n")
+    bin_dir = tmp_path / "bin"
+    argv_log = tmp_path / "codefly-argv.txt"
+    _fake_codefly(bin_dir, argv_log, exit_code)
+
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    result = subprocess.run(
+        [sys.executable, "-m", "solution_runtime.sdk.sync", "sync"],
+        cwd=solution,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == exit_code  # child exit code propagated through exec
+    assert argv_log.read_text().splitlines() == ["sync", "solution-sdk", "--language", "python"]
+    assert "superseded by api.consumes" in result.stderr
+
+
+def test_main_shims_from_parent_directory(tmp_path):
+    root = tmp_path / "workspace"
+    (root / ".git").mkdir(parents=True)
+    (root / "solution.codefly.yaml").write_text("api:\n  consumes: []\n")
+    nested = root / "services" / "backend"
+    nested.mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    argv_log = tmp_path / "codefly-argv.txt"
+    _fake_codefly(bin_dir, argv_log)
+
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    result = subprocess.run(
+        [sys.executable, "-m", "solution_runtime.sdk.sync", "sync"],
+        cwd=nested,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert argv_log.is_file()  # found solution.codefly.yaml two directories up
+
+
+def test_main_runs_legacy_path_with_single_deprecation_warning(tmp_path, monkeypatch):
+    manifest_path = _write_manifest(tmp_path)  # no solution.codefly.yaml alongside it
+    synced = []
+    monkeypatch.setattr(sync, "sync", lambda manifest: synced.append(manifest))
+
+    with pytest.warns(DeprecationWarning, match="solution.codefly.yaml") as records:
+        assert sync.main(["sync", "-f", str(manifest_path)]) == 0
+
+    assert len(records) == 1  # printed once
+    assert len(synced) == 1  # legacy path ran

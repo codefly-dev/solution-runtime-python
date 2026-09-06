@@ -33,10 +33,12 @@ solution, carrying only the functionality it declares.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,6 +248,30 @@ def sync(manifest: Manifest) -> None:
     write_source(manifest.out, manifest.dependencies)
 
 
+def _workspace_root(start: Path) -> Path:
+    """Bounds how far the shim looks upward for a `solution.codefly.yaml`. A
+    codefly workspace is rooted at its `codefly.yaml`; a bare git checkout at
+    its `.git`. Absent both, the filesystem root bounds the walk."""
+    for directory in (start, *start.parents):
+        if (directory / "codefly.yaml").is_file() or (directory / ".git").exists():
+            return directory
+    return Path(start.anchor)
+
+
+def _find_solution_manifest(start: Path) -> Path | None:
+    """`solution.codefly.yaml` in `start` or any parent up to the workspace
+    root, whichever comes first. Its presence means the module package now
+    carries the contracts and `codefly sync solution-sdk` owns the generation."""
+    root = _workspace_root(start)
+    for directory in (start, *start.parents):
+        candidate = directory / "solution.codefly.yaml"
+        if candidate.is_file():
+            return candidate
+        if directory == root:
+            break
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="solution-sdk")
     parser.add_argument("command", choices=["sync"])
@@ -256,6 +282,22 @@ def main(argv: list[str] | None = None) -> int:
         help="path to the dependency manifest (default: solution-sdk.yaml)",
     )
     args = parser.parse_args(argv)
+
+    if _find_solution_manifest(Path(args.file).resolve().parent) is not None:
+        print(
+            "solution-sdk.yaml is superseded by api.consumes in solution.codefly.yaml; "
+            "running codefly sync solution-sdk --language python",
+            file=sys.stderr,
+        )
+        os.execvp("codefly", ["codefly", "sync", "solution-sdk", "--language", "python"])
+
+    warnings.warn(
+        "solution-sdk.yaml is deprecated; declare api.consumes in solution.codefly.yaml "
+        "and run `codefly sync solution-sdk` instead (see codefly-dev/cli#550). This legacy "
+        "path is removed in the next minor.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     manifest = load_manifest(Path(args.file))
     sync(manifest)
     print(f"vendored {len(manifest.dependencies)} module(s) into {manifest.out}", file=sys.stderr)
