@@ -51,7 +51,7 @@ def last_login(gw: Gateway) -> dict:
 
 The generated facade is one class per service, one method per RPC, each routing through this runtime's `Gateway.unary` seam. The procedure string and response type are baked in by the generator, so a handler never threads either — and only the declared `services` are present. **`Gateway.unary(procedure, request, response_type)` is the seam the facade binds to**; the runtime never learns what "accounts" is, so a second module's SDK binds the same way.
 
-The facade generator itself now lives in codefly's proto companion (Python, Go and TypeScript), and the CLI resolves contracts from the module package rather than fetching a producer's git repo. This runtime keeps only the seam.
+The facade generator is moving into codefly's proto companion (Python, Go and TypeScript; codefly-dev/core#384), where the CLI resolves contracts from the module package rather than fetching a producer's git repo. Until that ships, this runtime still carries the generator — it also runs as a standalone protoc/buf plugin, `protoc-gen-solution_facade` — but the seam it binds to is all the runtime owns long-term.
 
 ### Migrating from `solution-sdk`
 

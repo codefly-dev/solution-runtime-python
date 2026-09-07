@@ -289,7 +289,10 @@ def main(argv: list[str] | None = None) -> int:
             "running codefly sync solution-sdk --language python",
             file=sys.stderr,
         )
-        os.execvp("codefly", ["codefly", "sync", "solution-sdk", "--language", "python"])
+        try:
+            os.execvp("codefly", ["codefly", "sync", "solution-sdk", "--language", "python"])
+        except FileNotFoundError:
+            raise SystemExit("codefly not found on PATH; install the codefly CLI to run solution-sdk sync")
 
     warnings.warn(
         "solution-sdk.yaml is deprecated; declare api.consumes in solution.codefly.yaml "

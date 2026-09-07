@@ -216,6 +216,14 @@ def test_main_shims_to_codefly_when_solution_manifest_present(tmp_path, exit_cod
     assert "superseded by api.consumes" in result.stderr
 
 
+def test_main_shim_reports_missing_codefly_cleanly(tmp_path, monkeypatch):
+    (tmp_path / "solution.codefly.yaml").write_text("api:\n  consumes: []\n")
+    monkeypatch.setattr(sync.os, "execvp", lambda *a: (_ for _ in ()).throw(FileNotFoundError()))
+
+    with pytest.raises(SystemExit, match="codefly not found on PATH"):
+        sync.main(["sync", "-f", str(tmp_path / "solution-sdk.yaml")])
+
+
 def test_main_shims_from_parent_directory(tmp_path):
     root = tmp_path / "workspace"
     (root / ".git").mkdir(parents=True)
@@ -242,6 +250,9 @@ def test_main_shims_from_parent_directory(tmp_path):
 def test_main_runs_legacy_path_with_single_deprecation_warning(tmp_path, monkeypatch):
     manifest_path = _write_manifest(tmp_path)  # no solution.codefly.yaml alongside it
     synced = []
+    # Pin the branch so this in-process main() cannot exec away the test runner
+    # if the checkout happens to sit under a workspace with a solution.codefly.yaml.
+    monkeypatch.setattr(sync, "_find_solution_manifest", lambda _: None)
     monkeypatch.setattr(sync, "sync", lambda manifest: synced.append(manifest))
 
     with pytest.warns(DeprecationWarning, match="solution.codefly.yaml") as records:
