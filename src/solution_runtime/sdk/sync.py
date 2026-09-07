@@ -278,12 +278,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-f",
         "--file",
-        default="solution-sdk.yaml",
-        help="path to the dependency manifest (default: solution-sdk.yaml)",
+        default=None,
+        help="path to the legacy dependency manifest (default: solution-sdk.yaml); "
+        "ignored once a solution.codefly.yaml is present, when sync shims to "
+        "codefly sync solution-sdk",
     )
     args = parser.parse_args(argv)
+    manifest_path = Path(args.file) if args.file is not None else Path("solution-sdk.yaml")
 
-    if _find_solution_manifest(Path(args.file).resolve().parent) is not None:
+    if _find_solution_manifest(manifest_path.resolve().parent) is not None:
+        if args.file is not None:
+            print(
+                f"ignoring -f {args.file}: solution.codefly.yaml takes precedence over the legacy manifest",
+                file=sys.stderr,
+            )
         print(
             "solution-sdk.yaml is superseded by api.consumes in solution.codefly.yaml; "
             "running codefly sync solution-sdk --language python",
@@ -301,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         DeprecationWarning,
         stacklevel=2,
     )
-    manifest = load_manifest(Path(args.file))
+    manifest = load_manifest(manifest_path)
     sync(manifest)
     print(f"vendored {len(manifest.dependencies)} module(s) into {manifest.out}", file=sys.stderr)
     return 0

@@ -209,11 +209,34 @@ def test_main_shims_to_codefly_when_solution_manifest_present(tmp_path, exit_cod
         env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == exit_code  # child exit code propagated through exec
     assert argv_log.read_text().splitlines() == ["sync", "solution-sdk", "--language", "python"]
     assert "superseded by api.consumes" in result.stderr
+    assert "ignoring -f" not in result.stderr  # no -f passed, nothing to announce
+
+
+def test_main_shim_announces_ignored_explicit_manifest(tmp_path):
+    solution = tmp_path / "solution"
+    solution.mkdir()
+    (solution / "solution.codefly.yaml").write_text("api:\n  consumes: []\n")
+    bin_dir = tmp_path / "bin"
+    _fake_codefly(bin_dir, tmp_path / "codefly-argv.txt")
+
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    result = subprocess.run(
+        [sys.executable, "-m", "solution_runtime.sdk.sync", "sync", "-f", "legacy.yaml"],
+        cwd=solution,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "ignoring -f legacy.yaml" in result.stderr  # the override is not silent
 
 
 def test_main_shim_reports_missing_codefly_cleanly(tmp_path, monkeypatch):
@@ -241,6 +264,7 @@ def test_main_shims_from_parent_directory(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == 0
