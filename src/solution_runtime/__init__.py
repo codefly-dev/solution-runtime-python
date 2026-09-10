@@ -23,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from .requests import Request, RequestError, Response, encode_response, read_request
+
 Handler = Callable[["Gateway"], Any]
 
 
@@ -81,9 +83,26 @@ class Solution:
     capabilities: list[str] = field(default_factory=list)
     dashboard: Any | None = None
     _handlers: dict[str, Handler] = field(default_factory=dict)
+    _routes: dict[tuple[str, str], Callable[[Gateway, Request], Response]] = field(default_factory=dict)
 
     def handle(self, path: str, handler: Handler) -> "Solution":
+        if ("GET", path) in self._routes:
+            raise ValueError("GET route already registered")
         self._handlers[path] = handler
+        return self
+
+    def route(self, path: str, handler: Callable[[Gateway, Request], Response], *, method: str = "GET") -> "Solution":
+        """Register an exact JSON route; authentication/permissions stay upstream."""
+        if method not in ("GET", "POST"):
+            raise ValueError("JSON routes support GET and POST")
+        if (not path.startswith("/") or path.startswith("//") or
+                any(c in path for c in "?#%") or any(ord(c) <= 32 or ord(c) >= 127 for c in path)):
+            raise ValueError("An exact ASCII route path is required")
+        if path in ("/health", "/.well-known/solution.json", "/.well-known/capabilities") or path.startswith("/assets/"):
+            raise ValueError("Runtime path is reserved")
+        if (method, path) in self._routes or (method == "GET" and path in self._handlers):
+            raise ValueError("Route already registered")
+        self._routes[(method, path)] = handler
         return self
 
     # --- config -----------------------------------------------------------
@@ -239,7 +258,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path == "/.well-known/solution.json":
+        if ("GET", path) in self._solution._routes:
+            self._run_route(path)
+        elif path == "/.well-known/solution.json":
             self._json(200, self._solution.manifest())
         elif path == "/.well-known/capabilities":
             self._json(200, self._solution.capabilities_response())
@@ -251,6 +272,51 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._run_handler(path)
         else:
             self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if ("POST", path) in self._solution._routes:
+            self._run_route(path)
+        else:
+            self._json(404, {"error": "not found"})
+
+    def _run_route(self, path: str) -> None:
+        # One incoming credential, one handler invocation, no automatic retries.
+        # No cookie identity, claimed principal headers or token decoding.
+        self.close_connection = True
+        credentials = self.headers.get_all("authorization", [])
+        response = Response({"error": "missing or invalid bearer"}, 401)
+        try:
+            if (len(credentials) == 1 and credentials[0][:7].lower() == "bearer " and
+                    7 < len(credentials[0]) <= 8192 and
+                    all(33 <= ord(c) <= 126 for c in credentials[0][7:])):
+                request = read_request(self)
+                gateway = Gateway(self._solution._gateway_url, credentials[0])
+                response = self._solution._routes[(self.command, path)](gateway, request)
+            payload = encode_response(response)
+        except RequestError as error:
+            response = Response({"error": error.message}, error.status)
+            try:
+                payload = encode_response(response)
+            except Exception:
+                response = Response({"error": "request failed"}, 500)
+                payload = encode_response(response)
+        except Exception:
+            response = Response({"error": "request failed"}, 500)
+            payload = encode_response(response)
+        self.send_response(response.status)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("cache-control", "no-store")
+        self.send_header("x-content-type-options", "nosniff")
+        self.send_header("content-length", str(len(payload)))
+        self.send_header("connection", "close")
+        self._cors()
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            # A lost acknowledgement does not cause a second invocation.
+            pass
 
     def _run_handler(self, path: str) -> None:
         bearer = self.headers.get("authorization", "")
