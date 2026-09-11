@@ -1,0 +1,25 @@
+{
+  "implementation": "e52bc05ad1aa0690938b804cf0c04de7fc8c85e9",
+  "source_dirty": false,
+  "python": "3.12.11",
+  "installed_wheel_sha256": "0880d038a6b1dbacf738c1f55469c421a93daf1018025d675343215ca7df76aa",
+  "source_sha256": {
+    "src/solution_runtime/__init__.py": "6adcc667e7fd255a1c2f22e03d022a41e802cab0af42ef23f9a50a9f1df4deb3",
+    "src/solution_runtime/requests.py": "ee3265f97c189083e46e68a6f4b7ae11a9f34623a2be4fc305c093fd817644a8",
+    "tests/test_requests.py": "366688e3d972e332d9a5295b1c396021a2bacb811702bf4c69c35ed832682735"
+  },
+  "packages": {
+    "solution-runtime": "0.0.3",
+    "pytest": "9.1.1",
+    "protobuf": "7.36.1",
+    "pyyaml": "6.0.3"
+  },
+  "validation": {
+    "passed": 102,
+    "skipped": 3,
+    "skip_reason": "Existing buf-dependent SDK tests: buf unavailable",
+    "new_route_cases": 49,
+    "installed_package_matches_source": true
+  },
+  "scope": "Native loopback HTTP and installed runtime wheel; no live host, identity provider, application store or deployment qualification"
+}
