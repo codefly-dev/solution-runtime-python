@@ -45,6 +45,7 @@ class Request:
     path: str
     query: Mapping[str, str] = field(repr=False)
     body: bytes = field(repr=False)
+    last_event_id: str = field(default="", repr=False)
 
     def json(self) -> Any:
         """Parse strict UTF-8 JSON. The application still validates its schema."""
@@ -114,6 +115,9 @@ def read_request(handler) -> Request:
         ):
             raise RequestError(415, "UTF-8 application/json required")
 
+    resume = handler.headers.get_all("last-event-id", [])
+    if len(resume) > 1 or (resume and (len(resume[0]) > 256 or any(ord(c) < 33 or ord(c) > 126 for c in resume[0]))):
+        raise RequestError(400, "Invalid Last-Event-ID")
     body = bytearray()
     previous_timeout = handler.connection.gettimeout()
     deadline = time.monotonic() + BODY_TIMEOUT_SECONDS
@@ -131,4 +135,4 @@ def read_request(handler) -> Request:
         raise RequestError(408, "Request body timed out") from None
     finally:
         handler.connection.settimeout(previous_timeout)
-    return Request(handler.command, path, MappingProxyType(query), bytes(body))
+    return Request(handler.command, path, MappingProxyType(query), bytes(body), resume[0] if resume else "")

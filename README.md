@@ -127,3 +127,15 @@ python -m pytest tests -q
 
 SDK generator tests additionally require their existing protoc/buf tools; the
 request-route tests have no generator or external-service dependency.
+
+### Bounded event streams
+
+An exact GET `route` may return `EventStream(iterator)` of typed `Event` values.
+The same incoming bearer and bounded `Request.last_event_id` reach the application.
+The application must authenticate before returning data, recheck authority before
+subsequent events, bound each iterator step with an upstream timeout, and implement
+`close()` to release upstream resources. A generator's `finally` is sufficient.
+The runtime prefetches the first event before success headers, flushes each frame,
+limits concurrent streams to32, lifetime to60seconds, event count to256 and each
+frame to512KiB. Socket writes time out after5seconds. Failures after headers and
+client disconnects close the iterator; there is no implicit retry or cancellation.
