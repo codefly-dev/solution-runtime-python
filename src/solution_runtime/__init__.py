@@ -160,7 +160,8 @@ class Solution:
             "GATEWAY_REGISTER_URL", "http://localhost:42152/solutions/_register"
         )
         self_upstream = _env("SELF_UPSTREAM", self._public_url)
-        headers = _register_headers()
+        from .registration import BoundRegistration
+        headers = BoundRegistration.configured(self.id, self._gateway_url, host_register, gateway_register) or _register_headers()
         interval = _register_interval()
         _spawn(
             _heartbeat,
@@ -208,6 +209,9 @@ def _post_registration(url: str, body: dict, headers: dict) -> str | None:
     on failure. Never raises: the caller loops forever, so any escaping
     exception would kill the heartbeat thread and leave the solution stale
     until it restarts."""
+    from .registration import BoundRegistration
+    if isinstance(headers, BoundRegistration):
+        return headers.post(url, body)
     try:
         data = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")

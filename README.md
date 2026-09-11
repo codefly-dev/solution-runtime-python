@@ -139,3 +139,18 @@ The runtime prefetches the first event before success headers, flushes each fram
 limits concurrent streams to32, lifetime to60seconds, event count to256 and each
 frame to512KiB. Socket writes time out after5seconds. Failures after headers and
 client disconnects close the iterator; there is no implicit retry or cancellation.
+
+For current SaaS hosts, configure `SOLUTION_REGISTRATION_SECRET_FILE` and
+`SOLUTION_REGISTRATION_INTERNAL_TOKEN_FILE` as protected rotating projections.
+The runtime exchanges them at the configured gateway's
+`/solutions/_registration-token` before **each** host/backend registration or lease
+renewal. Each half uses a distinct single-use token. The solution secret is bound
+by the existing Accounts registry to that solution and publisher; configuration
+never creates or grants this identity. The resulting token alone reaches the
+registration endpoint; long-lived credentials remain at the exchange endpoint.
+`SOLUTION_REGISTRATION_CA_FILE` optionally selects the HTTPS trust bundle. Redirects
+and environment proxies are disabled. Private mesh HTTP endpoints retain the
+normal host transport contract. An exchange failure does not fall back to shared
+internal-token registration. Without the opt-in secret file, historical consumers
+retain their previous behavior; current hosted LastLogin must enable the signed
+registration path. No conversation data or user bearer is used for registration.
