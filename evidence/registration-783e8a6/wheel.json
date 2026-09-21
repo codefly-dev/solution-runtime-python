@@ -1,0 +1,9 @@
+{
+  "source": "783e8a60095840247f4639ef7f4dd8c572c59fc5",
+  "sha256": "aaa009ab325501981b1a683d11cd1ce180f6594a1644fc0bea299b50ad9ae945",
+  "source_tests_passed": 107,
+  "existing_integration_skips": 11,
+  "installed_native_tests_passed": 62,
+  "published": false,
+  "hosted_accepted": false
+}

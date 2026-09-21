@@ -1,0 +1,8 @@
+{
+  "source": "c250bf6894986525cfe911766470eecc85313222",
+  "wheel": "solution_runtime-0.0.3-py3-none-any.whl",
+  "sha256": "63d0ce0e3cdbc9e0fa29dd192d75aeed355a19c339423e0e328192aacab945d5",
+  "validation": "60 native HTTP streaming/JSON tests passed against separately installed wheel; full source suite 105 passed, 11 existing integration skips",
+  "published": false,
+  "hosted_ready": false
+}
