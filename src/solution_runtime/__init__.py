@@ -23,6 +23,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from .requests import Request, RequestError, Response, encode_response, read_request
+from .streams import Event, EventStream, MAX_STREAM_SECONDS, MAX_STREAM_EVENTS
+
 Handler = Callable[["Gateway"], Any]
 
 
@@ -80,10 +83,28 @@ class Solution:
     contract: str = "lastlogin"
     capabilities: list[str] = field(default_factory=list)
     dashboard: Any | None = None
+    _stream_slots: Any = field(default_factory=lambda: threading.BoundedSemaphore(32), repr=False)
     _handlers: dict[str, Handler] = field(default_factory=dict)
+    _routes: dict[tuple[str, str], Callable[[Gateway, Request], Response | EventStream]] = field(default_factory=dict)
 
     def handle(self, path: str, handler: Handler) -> "Solution":
+        if ("GET", path) in self._routes:
+            raise ValueError("GET route already registered")
         self._handlers[path] = handler
+        return self
+
+    def route(self, path: str, handler: Callable[[Gateway, Request], Response | EventStream], *, method: str = "GET") -> "Solution":
+        """Register an exact route; GET may return a bounded EventStream."""
+        if method not in ("GET", "POST"):
+            raise ValueError("JSON routes support GET and POST")
+        if (not path.startswith("/") or path.startswith("//") or
+                any(c in path for c in "?#%") or any(ord(c) <= 32 or ord(c) >= 127 for c in path)):
+            raise ValueError("An exact ASCII route path is required")
+        if path in ("/health", "/.well-known/solution.json", "/.well-known/capabilities") or path.startswith("/assets/"):
+            raise ValueError("Runtime path is reserved")
+        if (method, path) in self._routes or (method == "GET" and path in self._handlers):
+            raise ValueError("Route already registered")
+        self._routes[(method, path)] = handler
         return self
 
     # --- config -----------------------------------------------------------
@@ -139,7 +160,8 @@ class Solution:
             "GATEWAY_REGISTER_URL", "http://localhost:42152/solutions/_register"
         )
         self_upstream = _env("SELF_UPSTREAM", self._public_url)
-        headers = _register_headers()
+        from .registration import BoundRegistration
+        headers = BoundRegistration.configured(self.id, self._gateway_url, host_register, gateway_register) or _register_headers()
         interval = _register_interval()
         _spawn(
             _heartbeat,
@@ -187,6 +209,9 @@ def _post_registration(url: str, body: dict, headers: dict) -> str | None:
     on failure. Never raises: the caller loops forever, so any escaping
     exception would kill the heartbeat thread and leave the solution stale
     until it restarts."""
+    from .registration import BoundRegistration
+    if isinstance(headers, BoundRegistration):
+        return headers.post(url, body)
     try:
         data = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -220,7 +245,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _cors(self) -> None:
         self.send_header("access-control-allow-origin", "*")
-        self.send_header("access-control-allow-headers", "authorization, content-type")
+        self.send_header("access-control-allow-headers", "authorization, content-type, last-event-id")
         self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
 
     def _json(self, status: int, body: dict) -> None:
@@ -239,7 +264,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path == "/.well-known/solution.json":
+        if ("GET", path) in self._solution._routes:
+            self._run_route(path)
+        elif path == "/.well-known/solution.json":
             self._json(200, self._solution.manifest())
         elif path == "/.well-known/capabilities":
             self._json(200, self._solution.capabilities_response())
@@ -251,6 +278,108 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._run_handler(path)
         else:
             self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if ("POST", path) in self._solution._routes:
+            self._run_route(path)
+        else:
+            self._json(404, {"error": "not found"})
+
+    def _run_route(self, path: str) -> None:
+        # One incoming credential, one handler invocation, no automatic retries.
+        # No cookie identity, claimed principal headers or token decoding.
+        self.close_connection = True
+        credentials = self.headers.get_all("authorization", [])
+        response = Response({"error": "missing or invalid bearer"}, 401)
+        try:
+            if (len(credentials) == 1 and credentials[0][:7].lower() == "bearer " and
+                    7 < len(credentials[0]) <= 8192 and
+                    all(33 <= ord(c) <= 126 for c in credentials[0][7:])):
+                request = read_request(self)
+                gateway = Gateway(self._solution._gateway_url, credentials[0])
+                response = self._solution._routes[(self.command, path)](gateway, request)
+            if isinstance(response, EventStream):
+                if self.command != "GET":
+                    response.close()
+                    raise ValueError("Streams require GET")
+                self._send_stream(response)
+                return
+            payload = encode_response(response)
+        except RequestError as error:
+            response = Response({"error": error.message}, error.status)
+            try:
+                payload = encode_response(response)
+            except Exception:
+                response = Response({"error": "request failed"}, 500)
+                payload = encode_response(response)
+        except Exception:
+            response = Response({"error": "request failed"}, 500)
+            payload = encode_response(response)
+        self.send_response(response.status)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("cache-control", "no-store")
+        self.send_header("x-content-type-options", "nosniff")
+        self.send_header("content-length", str(len(payload)))
+        self.send_header("connection", "close")
+        self._cors()
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            # A lost acknowledgement does not cause a second invocation.
+            pass
+
+    def _send_stream(self, stream: EventStream) -> None:
+        acquired = self._solution._stream_slots.acquire(blocking=False)
+        previous_timeout = self.connection.gettimeout()
+        started = False
+        try:
+            if not acquired:
+                raise RequestError(503, "Observation capacity reached")
+            deadline = time.monotonic() + MAX_STREAM_SECONDS
+            # Fetch and authorize the first event before sending HTTP success.
+            iterator = iter(stream.events)
+            first = next(iterator, None)
+            payload = first.encode() if isinstance(first, Event) else None
+            if first is not None and payload is None:
+                raise ValueError("Typed event required")
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream; charset=utf-8")
+            self.send_header("cache-control", "no-store, no-transform")
+            self.send_header("x-accel-buffering", "no")
+            self.send_header("x-content-type-options", "nosniff")
+            self.send_header("connection", "close")
+            self._cors()
+            self.end_headers()
+            started = True
+            count = 0
+            while payload is not None and time.monotonic() < deadline and count < MAX_STREAM_EVENTS:
+                self.connection.settimeout(min(5.0, max(0.001, deadline - time.monotonic())))
+                self.wfile.write(payload)
+                self.wfile.flush()
+                count += 1
+                if count >= MAX_STREAM_EVENTS or time.monotonic() >= deadline:
+                    break
+                event = next(iterator, None)
+                if event is not None and not isinstance(event, Event):
+                    raise ValueError("Typed event required")
+                payload = event.encode() if event is not None else None
+        except Exception:
+            if not started:
+                raise
+            # After headers, failures close observation without leaking details
+            # or manufacturing an application success/failure event.
+        finally:
+            self.connection.settimeout(previous_timeout)
+            try:
+                stream.close()
+            except Exception:
+                if not started:
+                    raise
+            finally:
+                if acquired:
+                    self._solution._stream_slots.release()
 
     def _run_handler(self, path: str) -> None:
         bearer = self.headers.get("authorization", "")
